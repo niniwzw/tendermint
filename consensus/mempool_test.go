@@ -2,7 +2,6 @@ package consensus
 
 import (
 	"encoding/binary"
-	//	"math/rand"
 	"testing"
 	"time"
 
@@ -31,7 +30,7 @@ func TestTxConcurrentWithCommit(t *testing.T) {
 			binary.BigEndian.PutUint64(txBytes, uint64(i))
 			err := cs.mempool.CheckTx(txBytes, nil)
 			if err != nil {
-				t.Fatal("Error after CheckTx: %v", err)
+				panic(Fmt("Error after CheckTx: %v", err))
 			}
 			//	time.Sleep(time.Microsecond * time.Duration(rand.Int63n(3000)))
 		}
@@ -41,14 +40,75 @@ func TestTxConcurrentWithCommit(t *testing.T) {
 	go appendTxsRange(0, NTxs)
 
 	startTestRound(cs, height, round)
-	ticker := time.NewTicker(time.Second * 5)
+	ticker := time.NewTicker(time.Second * 20)
 	for nTxs := 0; nTxs < NTxs; {
 		select {
 		case b := <-newBlockCh:
 			nTxs += b.(types.EventDataNewBlock).Block.Header.NumTxs
 		case <-ticker.C:
-			t.Fatal("Timed out waiting to commit blocks with transactions")
+			panic("Timed out waiting to commit blocks with transactions")
 		}
+	}
+}
+
+func TestRmBadTx(t *testing.T) {
+	state, privVals := randGenesisState(1, false, 10)
+	app := NewCounterApplication()
+	cs := newConsensusState(state, privVals[0], app)
+
+	// increment the counter by 1
+	txBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(txBytes, uint64(0))
+	app.AppendTx(txBytes)
+	app.Commit()
+
+	ch := make(chan struct{})
+	cbCh := make(chan struct{})
+	go func() {
+		// Try to send the tx through the mempool.
+		// CheckTx should not err, but the app should return a bad tmsp code
+		// and the tx should get removed from the pool
+		err := cs.mempool.CheckTx(txBytes, func(r *tmsp.Response) {
+			if r.GetCheckTx().Code != tmsp.CodeType_BadNonce {
+				t.Fatalf("expected checktx to return bad nonce, got %v", r)
+			}
+			cbCh <- struct{}{}
+		})
+		if err != nil {
+			t.Fatal("Error after CheckTx: %v", err)
+		}
+
+		// check for the tx
+		for {
+			time.Sleep(time.Second)
+			select {
+			case <-ch:
+			default:
+				txs := cs.mempool.Reap(1)
+				if len(txs) == 0 {
+					ch <- struct{}{}
+				}
+
+			}
+		}
+	}()
+
+	// Wait until the tx returns
+	ticker := time.After(time.Second * 5)
+	select {
+	case <-cbCh:
+		// success
+	case <-ticker:
+		t.Fatalf("Timed out waiting for tx to return")
+	}
+
+	// Wait until the tx is removed
+	ticker = time.After(time.Second * 5)
+	select {
+	case <-ch:
+		// success
+	case <-ticker:
+		t.Fatalf("Timed out waiting for tx to be removed")
 	}
 }
 
@@ -84,11 +144,7 @@ func runTx(tx []byte, countPtr *int) tmsp.Result {
 	copy(tx8[len(tx8)-len(tx):], tx)
 	txValue := binary.BigEndian.Uint64(tx8)
 	if txValue != uint64(count) {
-		return tmsp.Result{
-			Code: tmsp.CodeType_BadNonce,
-			Data: nil,
-			Log:  Fmt("Invalid nonce. Expected %v, got %v", count, txValue),
-		}
+		return tmsp.ErrBadNonce.AppendLog(Fmt("Invalid nonce. Expected %v, got %v", count, txValue))
 	}
 	*countPtr += 1
 	return tmsp.OK

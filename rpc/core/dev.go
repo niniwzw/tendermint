@@ -9,6 +9,11 @@ import (
 	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 )
 
+func UnsafeFlushMempool() (*ctypes.ResultUnsafeFlushMempool, error) {
+	mempool.Flush()
+	return &ctypes.ResultUnsafeFlushMempool{}, nil
+}
+
 func UnsafeSetConfig(typ, key, value string) (*ctypes.ResultUnsafeSetConfig, error) {
 	switch typ {
 	case "string":

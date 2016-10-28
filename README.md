@@ -1,9 +1,27 @@
 # Tendermint
 Simple, Secure, Scalable Blockchain Platform
 
-[![CircleCI](https://circleci.com/gh/tendermint/tendermint.svg?style=svg)](https://circleci.com/gh/tendermint/tendermint)
+[![version](https://img.shields.io/github/tag/tendermint/tendermint.svg)](https://github.com/tendermint/tendermint/releases/latest)
+[![API Reference](
+https://camo.githubusercontent.com/915b7be44ada53c290eb157634330494ebe3e30a/68747470733a2f2f676f646f632e6f72672f6769746875622e636f6d2f676f6c616e672f6764646f3f7374617475732e737667
+)](https://godoc.org/github.com/tendermint/tendermint)
+[![chat](https://img.shields.io/badge/slack-join%20chat-pink.svg)](http://forum.tendermint.com:3000/)
+[![license](https://img.shields.io/github/license/tendermint/tendermint.svg)](https://github.com/tendermint/tendermint/blob/master/LICENSE)
+
+Branch    | Tests | Coverage | Report Card
+----------|-------|----------|-------------
+develop   | [![CircleCI](https://circleci.com/gh/tendermint/tendermint/tree/develop.svg?style=shield)](https://circleci.com/gh/tendermint/tendermint/tree/develop) | [![codecov](https://codecov.io/gh/tendermint/tendermint/branch/develop/graph/badge.svg)](https://codecov.io/gh/tendermint/tendermint) | [![Go Report Card](https://goreportcard.com/badge/github.com/tendermint/tendermint/tree/develop)](https://goreportcard.com/report/github.com/tendermint/tendermint/tree/develop)
+master    | [![CircleCI](https://circleci.com/gh/tendermint/tendermint/tree/master.svg?style=shield)](https://circleci.com/gh/tendermint/tendermint/tree/master) | [![codecov](https://codecov.io/gh/tendermint/tendermint/branch/master/graph/badge.svg)](https://codecov.io/gh/tendermint/tendermint) | [![Go Report Card](https://goreportcard.com/badge/github.com/tendermint/tendermint/tree/master)](https://goreportcard.com/report/github.com/tendermint/tendermint/tree/master)
 
 _NOTE: This is yet pre-alpha non-production-quality software._
+
+Tendermint Core is Byzantine Fault Tolerant (BFT) middleware that takes a state transition machine, written in any programming language,
+and replicates it on many machines.
+See the [application developers guide](https://github.com/tendermint/tendermint/wiki/Application-Developers) to get started.
+
+## Contributing
+
+Yay open source! Please see our [contributing guidelines](https://github.com/tendermint/tendermint/wiki/Contributing).
 
 ## Resources
 
@@ -26,39 +44,9 @@ _NOTE: This is yet pre-alpha non-production-quality software._
 * [Go-Wire](http://github.com/tendermint/go-wire)
 * [Go-P2P](http://github.com/tendermint/go-p2p)
 * [Go-Merkle](http://github.com/tendermint/go-merkle)
-* 
 
-### Install
+## Install
 
-Make sure you have installed Go and [set the GOPATH](https://github.com/tendermint/tendermint/wiki/Setting-GOPATH).
+`go get -u github.com/tendermint/tendermint/cmd/tendermint`
 
-Install `glide`, used for dependency management:
-
-```
-go get https://github.com/Masterminds/glide
-```
-
-Install tendermint:
-
-```
-mkdir -p $GOPATH/src/github.com/tendermint
-git clone https://github.com/tendermint/tendermint $GOPATH/src/github.com/tendermint/tendermint
-cd $GOPATH/src/github.com/tendermint/tendermint
-glide install
-go install ./cmd/tendermint
-```
-
-Initialize a sample tendermint directory with an example genesis file (in `~/.tendermint`):
-
-```
-tendermint init
-```
-
-Now run the tendermint node:
-
-```
-tendermint node --proxy_app=dummy
-```
-
-For tutorials on running other applications with Tendermint, and for launching test networks,
-see http://tendermint.com/guide/
+For more details, see the [install guide](https://github.com/tendermint/tendermint/wiki/Installation).

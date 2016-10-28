@@ -8,16 +8,7 @@ import (
 )
 
 func Validators() (*ctypes.ResultValidators, error) {
-	var blockHeight int
-	var validators []*types.Validator
-
-	state := consensusState.GetState()
-	blockHeight = state.LastBlockHeight
-	state.Validators.Iterate(func(index int, val *types.Validator) bool {
-		validators = append(validators, val)
-		return false
-	})
-
+	blockHeight, validators := consensusState.GetValidators()
 	return &ctypes.ResultValidators{blockHeight, validators}, nil
 }
 

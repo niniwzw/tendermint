@@ -19,11 +19,16 @@ var Routes = map[string]*rpc.RPCFunc{
 	"block":                rpc.NewRPCFunc(BlockResult, "height"),
 	"validators":           rpc.NewRPCFunc(ValidatorsResult, ""),
 	"dump_consensus_state": rpc.NewRPCFunc(DumpConsensusStateResult, ""),
+	"broadcast_tx_commit":  rpc.NewRPCFunc(BroadcastTxCommitResult, "tx"),
 	"broadcast_tx_sync":    rpc.NewRPCFunc(BroadcastTxSyncResult, "tx"),
 	"broadcast_tx_async":   rpc.NewRPCFunc(BroadcastTxAsyncResult, "tx"),
 	"unconfirmed_txs":      rpc.NewRPCFunc(UnconfirmedTxsResult, ""),
 	"num_unconfirmed_txs":  rpc.NewRPCFunc(NumUnconfirmedTxsResult, ""),
 
+	"tmsp_query": rpc.NewRPCFunc(TMSPQueryResult, "query"),
+	"tmsp_info":  rpc.NewRPCFunc(TMSPInfoResult, ""),
+
+	"unsafe_flush_mempool":      rpc.NewRPCFunc(UnsafeFlushMempool, ""),
 	"unsafe_set_config":         rpc.NewRPCFunc(UnsafeSetConfigResult, "type,key,value"),
 	"unsafe_start_cpu_profiler": rpc.NewRPCFunc(UnsafeStartCPUProfilerResult, "filename"),
 	"unsafe_stop_cpu_profiler":  rpc.NewRPCFunc(UnsafeStopCPUProfilerResult, ""),
@@ -126,6 +131,14 @@ func NumUnconfirmedTxsResult() (ctypes.TMResult, error) {
 	}
 }
 
+func BroadcastTxCommitResult(tx []byte) (ctypes.TMResult, error) {
+	if r, err := BroadcastTxCommit(tx); err != nil {
+		return nil, err
+	} else {
+		return r, nil
+	}
+}
+
 func BroadcastTxSyncResult(tx []byte) (ctypes.TMResult, error) {
 	if r, err := BroadcastTxSync(tx); err != nil {
 		return nil, err
@@ -136,6 +149,30 @@ func BroadcastTxSyncResult(tx []byte) (ctypes.TMResult, error) {
 
 func BroadcastTxAsyncResult(tx []byte) (ctypes.TMResult, error) {
 	if r, err := BroadcastTxAsync(tx); err != nil {
+		return nil, err
+	} else {
+		return r, nil
+	}
+}
+
+func TMSPQueryResult(query []byte) (ctypes.TMResult, error) {
+	if r, err := TMSPQuery(query); err != nil {
+		return nil, err
+	} else {
+		return r, nil
+	}
+}
+
+func TMSPInfoResult() (ctypes.TMResult, error) {
+	if r, err := TMSPInfo(); err != nil {
+		return nil, err
+	} else {
+		return r, nil
+	}
+}
+
+func UnsafeFlushMempoolResult() (ctypes.TMResult, error) {
+	if r, err := UnsafeFlushMempool(); err != nil {
 		return nil, err
 	} else {
 		return r, nil

@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	. "github.com/tendermint/go-common"
-	"github.com/tendermint/go-events"
 	"github.com/tendermint/tendermint/proxy"
 	"github.com/tendermint/tendermint/types"
 	tmsp "github.com/tendermint/tmsp/types"
@@ -18,7 +17,7 @@ func (s *State) ValidateBlock(block *types.Block) error {
 
 // Execute the block to mutate State.
 // Validates block and then executes Data.Txs in the block.
-func (s *State) ExecBlock(evsw *events.EventSwitch, proxyAppConn proxy.AppConn, block *types.Block, blockPartsHeader types.PartSetHeader) error {
+func (s *State) ExecBlock(eventCache types.Fireable, proxyAppConn proxy.AppConnConsensus, block *types.Block, blockPartsHeader types.PartSetHeader) error {
 
 	// Validate the block.
 	err := s.validateBlock(block)
@@ -34,7 +33,7 @@ func (s *State) ExecBlock(evsw *events.EventSwitch, proxyAppConn proxy.AppConn, 
 	nextValSet := valSet.Copy()
 
 	// Execute the block txs
-	err = s.execBlockOnProxyApp(evsw, proxyAppConn, block)
+	err = s.execBlockOnProxyApp(eventCache, proxyAppConn, block)
 	if err != nil {
 		// There was some error in proxyApp
 		// TODO Report error and wait for proxyApp to be available.
@@ -55,7 +54,7 @@ func (s *State) ExecBlock(evsw *events.EventSwitch, proxyAppConn proxy.AppConn, 
 
 // Executes block's transactions on proxyAppConn.
 // TODO: Generate a bitmap or otherwise store tx validity in state.
-func (s *State) execBlockOnProxyApp(evsw *events.EventSwitch, proxyAppConn proxy.AppConn, block *types.Block) error {
+func (s *State) execBlockOnProxyApp(eventCache types.Fireable, proxyAppConn proxy.AppConnConsensus, block *types.Block) error {
 
 	var validTxs, invalidTxs = 0, 0
 
@@ -67,15 +66,30 @@ func (s *State) execBlockOnProxyApp(evsw *events.EventSwitch, proxyAppConn proxy
 			// TODO: make use of this info
 			// Blocks may include invalid txs.
 			// reqAppendTx := req.(tmsp.RequestAppendTx)
-			if r.AppendTx.Code == tmsp.CodeType_OK {
+			txError := ""
+			apTx := r.AppendTx
+			if apTx.Code == tmsp.CodeType_OK {
 				validTxs += 1
 			} else {
 				log.Debug("Invalid tx", "code", r.AppendTx.Code, "log", r.AppendTx.Log)
 				invalidTxs += 1
+				txError = apTx.Code.String()
 			}
+			// NOTE: if we count we can access the tx from the block instead of
+			// pulling it from the req
+			event := types.EventDataTx{
+				Tx:     req.GetAppendTx().Tx,
+				Result: apTx.Data,
+				Code:   apTx.Code,
+				Log:    apTx.Log,
+				Error:  txError,
+			}
+			types.FireEventTx(eventCache, event)
 		}
 	}
 	proxyAppConn.SetResponseCallback(proxyCb)
+
+	// TODO: BeginBlock
 
 	// Run txs of block
 	for _, tx := range block.Txs {
@@ -92,7 +106,7 @@ func (s *State) execBlockOnProxyApp(evsw *events.EventSwitch, proxyAppConn proxy
 		return err
 	}
 	// TODO: Do something with changedValidators
-	log.Info("TODO: Do something with changedValidators", changedValidators)
+	log.Info("TODO: Do something with changedValidators", "changedValidators", changedValidators)
 
 	log.Info(Fmt("ExecBlock got %v valid txs and %v invalid txs", validTxs, invalidTxs))
 	return nil

@@ -68,6 +68,16 @@ type ResultUnconfirmedTxs struct {
 	Txs []types.Tx `json:"txs"`
 }
 
+type ResultTMSPInfo struct {
+	Result tmsp.Result `json:"result"`
+}
+
+type ResultTMSPQuery struct {
+	Result tmsp.Result `json:"result"`
+}
+
+type ResultUnsafeFlushMempool struct{}
+
 type ResultUnsafeSetConfig struct{}
 
 type ResultUnsafeProfile struct{}
@@ -105,6 +115,10 @@ const (
 	ResultTypeBroadcastTx    = byte(0x60)
 	ResultTypeUnconfirmedTxs = byte(0x61)
 
+	// 0x7 bytes are for querying the application
+	ResultTypeTMSPQuery = byte(0x70)
+	ResultTypeTMSPInfo  = byte(0x71)
+
 	// 0x8 bytes are for events
 	ResultTypeSubscribe   = byte(0x80)
 	ResultTypeUnsubscribe = byte(0x81)
@@ -115,6 +129,7 @@ const (
 	ResultTypeUnsafeStartCPUProfiler = byte(0xa1)
 	ResultTypeUnsafeStopCPUProfiler  = byte(0xa2)
 	ResultTypeUnsafeWriteHeapProfile = byte(0xa3)
+	ResultTypeUnsafeFlushMempool     = byte(0xa4)
 )
 
 type TMResult interface {
@@ -141,4 +156,7 @@ var _ = wire.RegisterInterface(
 	wire.ConcreteType{&ResultUnsafeProfile{}, ResultTypeUnsafeStartCPUProfiler},
 	wire.ConcreteType{&ResultUnsafeProfile{}, ResultTypeUnsafeStopCPUProfiler},
 	wire.ConcreteType{&ResultUnsafeProfile{}, ResultTypeUnsafeWriteHeapProfile},
+	wire.ConcreteType{&ResultUnsafeFlushMempool{}, ResultTypeUnsafeFlushMempool},
+	wire.ConcreteType{&ResultTMSPQuery{}, ResultTypeTMSPQuery},
+	wire.ConcreteType{&ResultTMSPInfo{}, ResultTypeTMSPInfo},
 )

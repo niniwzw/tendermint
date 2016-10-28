@@ -6,14 +6,12 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	. "github.com/tendermint/go-common"
 	cfg "github.com/tendermint/go-config"
 	"github.com/tendermint/go-crypto"
 	dbm "github.com/tendermint/go-db"
-	"github.com/tendermint/go-events"
 	"github.com/tendermint/go-p2p"
 	"github.com/tendermint/go-rpc"
 	"github.com/tendermint/go-rpc/server"
@@ -26,9 +24,6 @@ import (
 	sm "github.com/tendermint/tendermint/state"
 	"github.com/tendermint/tendermint/types"
 	"github.com/tendermint/tendermint/version"
-	tmspcli "github.com/tendermint/tmsp/client"
-	"github.com/tendermint/tmsp/example/dummy"
-	"github.com/tendermint/tmsp/example/nil"
 )
 
 import _ "net/http/pprof"
@@ -36,7 +31,7 @@ import _ "net/http/pprof"
 type Node struct {
 	config           cfg.Config
 	sw               *p2p.Switch
-	evsw             *events.EventSwitch
+	evsw             types.EventSwitch
 	blockStore       *bc.BlockStore
 	bcReactor        *bc.BlockchainReactor
 	mempoolReactor   *mempl.MempoolReactor
@@ -45,9 +40,17 @@ type Node struct {
 	privValidator    *types.PrivValidator
 	genesisDoc       *types.GenesisDoc
 	privKey          crypto.PrivKeyEd25519
+	proxyApp         proxy.AppConns
 }
 
-func NewNode(config cfg.Config, privValidator *types.PrivValidator, getProxyApp func(proxyAddr, transport string, appHash []byte) proxy.AppConn) *Node {
+func NewNodeDefault(config cfg.Config) *Node {
+	// Get PrivValidator
+	privValidatorFile := config.GetString("priv_validator_file")
+	privValidator := types.LoadOrGenPrivValidator(privValidatorFile)
+	return NewNode(config, privValidator, proxy.DefaultClientCreator(config))
+}
+
+func NewNode(config cfg.Config, privValidator *types.PrivValidator, clientCreator proxy.ClientCreator) *Node {
 
 	EnsureDir(config.GetString("db_dir"), 0700) // incase we use memdb, cswal still gets written here
 
@@ -61,12 +64,12 @@ func NewNode(config cfg.Config, privValidator *types.PrivValidator, getProxyApp 
 	// Get State
 	state := getState(config, stateDB)
 
-	// Create two proxyAppConn connections,
-	// one for the consensus and one for the mempool.
-	proxyAddr := config.GetString("proxy_app")
-	transport := config.GetString("tmsp")
-	proxyAppConnMempool := getProxyApp(proxyAddr, transport, state.AppHash)
-	proxyAppConnConsensus := getProxyApp(proxyAddr, transport, state.AppHash)
+	// Create the proxyApp, which houses three connections:
+	// query, consensus, and mempool
+	proxyApp := proxy.NewAppConns(config, clientCreator, state, blockStore)
+	if _, err := proxyApp.Start(); err != nil {
+		Exit(Fmt("Error starting proxy app connections: %v", err))
+	}
 
 	// add the chainid and number of validators to the global config
 	config.Set("chain_id", state.ChainID)
@@ -76,7 +79,7 @@ func NewNode(config cfg.Config, privValidator *types.PrivValidator, getProxyApp 
 	privKey := crypto.GenPrivKeyEd25519()
 
 	// Make event switch
-	eventSwitch := events.NewEventSwitch()
+	eventSwitch := types.NewEventSwitch()
 	_, err := eventSwitch.Start()
 	if err != nil {
 		Exit(Fmt("Failed to start switch: %v", err))
@@ -93,23 +96,17 @@ func NewNode(config cfg.Config, privValidator *types.PrivValidator, getProxyApp 
 	}
 
 	// Make BlockchainReactor
-	bcReactor := bc.NewBlockchainReactor(state.Copy(), proxyAppConnConsensus, blockStore, fastSync)
+	bcReactor := bc.NewBlockchainReactor(state.Copy(), proxyApp.Consensus(), blockStore, fastSync)
 
 	// Make MempoolReactor
-	mempool := mempl.NewMempool(config, proxyAppConnMempool)
+	mempool := mempl.NewMempool(config, proxyApp.Mempool())
 	mempoolReactor := mempl.NewMempoolReactor(config, mempool)
 
 	// Make ConsensusReactor
-	consensusState := consensus.NewConsensusState(config, state.Copy(), proxyAppConnConsensus, blockStore, mempool)
+	consensusState := consensus.NewConsensusState(config, state.Copy(), proxyApp.Consensus(), blockStore, mempool)
 	consensusReactor := consensus.NewConsensusReactor(consensusState, blockStore, fastSync)
 	if privValidator != nil {
 		consensusReactor.SetPrivValidator(privValidator)
-	}
-
-	// deterministic accountability
-	err = consensusState.OpenWAL(config.GetString("cswal"))
-	if err != nil {
-		log.Error("Failed to open cswal", "error", err.Error())
 	}
 
 	// Make p2p network switch
@@ -118,6 +115,27 @@ func NewNode(config cfg.Config, privValidator *types.PrivValidator, getProxyApp 
 	sw.AddReactor("BLOCKCHAIN", bcReactor)
 	sw.AddReactor("CONSENSUS", consensusReactor)
 
+	// filter peers by addr or pubkey with a tmsp query.
+	// if the query return code is OK, add peer
+	// XXX: query format subject to change
+	if config.GetBool("filter_peers") {
+		// NOTE: addr is ip:port
+		sw.SetAddrFilter(func(addr net.Addr) error {
+			res := proxyApp.Query().QuerySync([]byte(Fmt("p2p/filter/addr/%s", addr.String())))
+			if res.IsOK() {
+				return nil
+			}
+			return res
+		})
+		sw.SetPubKeyFilter(func(pubkey crypto.PubKeyEd25519) error {
+			res := proxyApp.Query().QuerySync([]byte(Fmt("p2p/filter/pubkey/%X", pubkey.Bytes())))
+			if res.IsOK() {
+				return nil
+			}
+			return res
+		})
+	}
+
 	// add the event switch to all services
 	// they should all satisfy events.Eventable
 	SetEventSwitch(eventSwitch, bcReactor, mempoolReactor, consensusReactor)
@@ -125,6 +143,7 @@ func NewNode(config cfg.Config, privValidator *types.PrivValidator, getProxyApp 
 	// run the profile server
 	profileHost := config.GetString("prof_laddr")
 	if profileHost != "" {
+
 		go func() {
 			log.Warn("Profile server", "error", http.ListenAndServe(profileHost, nil))
 		}()
@@ -142,6 +161,7 @@ func NewNode(config cfg.Config, privValidator *types.PrivValidator, getProxyApp 
 		privValidator:    privValidator,
 		genesisDoc:       state.GenesisDoc,
 		privKey:          privKey,
+		proxyApp:         proxyApp,
 	}
 }
 
@@ -160,7 +180,7 @@ func (n *Node) Stop() {
 }
 
 // Add the event switch to reactors, mempool, etc.
-func SetEventSwitch(evsw *events.EventSwitch, eventables ...events.Eventable) {
+func SetEventSwitch(evsw types.EventSwitch, eventables ...types.Eventable) {
 	for _, e := range eventables {
 		e.SetEventSwitch(evsw)
 	}
@@ -177,13 +197,14 @@ func (n *Node) AddListener(l p2p.Listener) {
 func (n *Node) StartRPC() ([]net.Listener, error) {
 	rpccore.SetConfig(n.config)
 
+	rpccore.SetEventSwitch(n.evsw)
 	rpccore.SetBlockStore(n.blockStore)
 	rpccore.SetConsensusState(n.consensusState)
-	rpccore.SetConsensusReactor(n.consensusReactor)
-	rpccore.SetMempoolReactor(n.mempoolReactor)
+	rpccore.SetMempool(n.mempoolReactor.Mempool)
 	rpccore.SetSwitch(n.sw)
-	rpccore.SetPrivValidator(n.privValidator)
+	rpccore.SetPubKey(n.privValidator.PubKey)
 	rpccore.SetGenesisDoc(n.genesisDoc)
+	rpccore.SetProxyAppQuery(n.proxyApp.Query())
 
 	listenAddrs := strings.Split(n.config.GetString("rpc_laddr"), ",")
 
@@ -223,13 +244,21 @@ func (n *Node) MempoolReactor() *mempl.MempoolReactor {
 	return n.mempoolReactor
 }
 
-func (n *Node) EventSwitch() *events.EventSwitch {
+func (n *Node) EventSwitch() types.EventSwitch {
 	return n.evsw
 }
 
 // XXX: for convenience
 func (n *Node) PrivValidator() *types.PrivValidator {
 	return n.privValidator
+}
+
+func (n *Node) GenesisDoc() *types.GenesisDoc {
+	return n.genesisDoc
+}
+
+func (n *Node) ProxyApp() proxy.AppConns {
+	return n.proxyApp
 }
 
 func makeNodeInfo(config cfg.Config, sw *p2p.Switch, privKey crypto.PrivKeyEd25519) *p2p.NodeInfo {
@@ -269,40 +298,6 @@ func makeNodeInfo(config cfg.Config, sw *p2p.Switch, privKey crypto.PrivKeyEd255
 	return nodeInfo
 }
 
-// Get a connection to the proxyAppConn addr.
-// Check the current hash, and panic if it doesn't match.
-func GetProxyApp(addr, transport string, hash []byte) (proxyAppConn proxy.AppConn) {
-	// use local app (for testing)
-	switch addr {
-	case "nilapp":
-		app := nilapp.NewNilApplication()
-		mtx := new(sync.Mutex)
-		proxyAppConn = tmspcli.NewLocalClient(mtx, app)
-	case "dummy":
-		app := dummy.NewDummyApplication()
-		mtx := new(sync.Mutex)
-		proxyAppConn = tmspcli.NewLocalClient(mtx, app)
-	default:
-		// Run forever in a loop
-		remoteApp, err := proxy.NewRemoteAppConn(addr, transport)
-		if err != nil {
-			Exit(Fmt("Failed to connect to proxy for mempool: %v", err))
-		}
-		proxyAppConn = remoteApp
-	}
-
-	// Check the hash
-	res := proxyAppConn.CommitSync()
-	if res.IsErr() {
-		PanicCrisis(Fmt("Error in getting proxyAppConn hash: %v", res))
-	}
-	if !bytes.Equal(hash, res.Data) {
-		log.Warn(Fmt("ProxyApp hash does not match.  Expected %X, got %X", hash, res.Data))
-	}
-
-	return proxyAppConn
-}
-
 // Load the most recent state from "state" db,
 // or create a new one (and save) from genesis.
 func getState(config cfg.Config, stateDB dbm.DB) *sm.State {
@@ -316,9 +311,12 @@ func getState(config cfg.Config, stateDB dbm.DB) *sm.State {
 
 //------------------------------------------------------------------------------
 
-// Users wishing to use an external signer for their validators
+// Users wishing to:
+//	* use an external signer for their validators
+//	* supply an in-proc tmsp app
 // should fork tendermint/tendermint and implement RunNode to
-// load their custom priv validator and call NewNode(privVal, getProxyFunc)
+// call NewNode with their custom priv validator and/or custom
+// proxy.ClientCreator interface
 func RunNode(config cfg.Config) {
 	// Wait until the genesis doc becomes available
 	genDocFile := config.GetString("genesis_file")
@@ -341,13 +339,11 @@ func RunNode(config cfg.Config) {
 		}
 	}
 
-	// Get PrivValidator
-	privValidatorFile := config.GetString("priv_validator_file")
-	privValidator := types.LoadOrGenPrivValidator(privValidatorFile)
-
 	// Create & start node
-	n := NewNode(config, privValidator, GetProxyApp)
-	l := p2p.NewDefaultListener("tcp", config.GetString("node_laddr"), config.GetBool("skip_upnp"))
+	n := NewNodeDefault(config)
+
+	protocol, address := ProtocolAndAddress(config.GetString("node_laddr"))
+	l := p2p.NewDefaultListener(protocol, address, config.GetBool("skip_upnp"))
 	n.AddListener(l)
 	err := n.Start()
 	if err != nil {
@@ -399,24 +395,21 @@ func newConsensusState(config cfg.Config) *consensus.ConsensusState {
 
 	// Create two proxyAppConn connections,
 	// one for the consensus and one for the mempool.
-	proxyAddr := config.GetString("proxy_app")
-	transport := config.GetString("tmsp")
-	proxyAppConnMempool := GetProxyApp(proxyAddr, transport, state.AppHash)
-	proxyAppConnConsensus := GetProxyApp(proxyAddr, transport, state.AppHash)
+	proxyApp := proxy.NewAppConns(config, proxy.DefaultClientCreator(config), state, blockStore)
 
 	// add the chainid to the global config
 	config.Set("chain_id", state.ChainID)
 
 	// Make event switch
-	eventSwitch := events.NewEventSwitch()
+	eventSwitch := types.NewEventSwitch()
 	_, err := eventSwitch.Start()
 	if err != nil {
 		Exit(Fmt("Failed to start event switch: %v", err))
 	}
 
-	mempool := mempl.NewMempool(config, proxyAppConnMempool)
+	mempool := mempl.NewMempool(config, proxyApp.Mempool())
 
-	consensusState := consensus.NewConsensusState(config, state.Copy(), proxyAppConnConsensus, blockStore, mempool)
+	consensusState := consensus.NewConsensusState(config, state.Copy(), proxyApp.Consensus(), blockStore, mempool)
 	consensusState.SetEventSwitch(eventSwitch)
 	return consensusState
 }
@@ -446,4 +439,14 @@ func RunReplay(config cfg.Config) {
 		Exit(Fmt("Error during consensus replay: %v", err))
 	}
 	log.Notice("Replay run successfully")
+}
+
+// Defaults to tcp
+func ProtocolAndAddress(listenAddr string) (string, string) {
+	protocol, address := "tcp", listenAddr
+	parts := strings.SplitN(address, "://", 2)
+	if len(parts) == 2 {
+		protocol, address = parts[0], parts[1]
+	}
+	return protocol, address
 }

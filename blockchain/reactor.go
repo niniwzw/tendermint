@@ -8,7 +8,6 @@ import (
 	"time"
 
 	. "github.com/tendermint/go-common"
-	"github.com/tendermint/go-events"
 	"github.com/tendermint/go-p2p"
 	"github.com/tendermint/go-wire"
 	"github.com/tendermint/tendermint/proxy"
@@ -44,7 +43,7 @@ type BlockchainReactor struct {
 
 	sw           *p2p.Switch
 	state        *sm.State
-	proxyAppConn proxy.AppConn // same as consensus.proxyAppConn
+	proxyAppConn proxy.AppConnConsensus // same as consensus.proxyAppConn
 	store        *BlockStore
 	pool         *BlockPool
 	fastSync     bool
@@ -52,10 +51,10 @@ type BlockchainReactor struct {
 	timeoutsCh   chan string
 	lastBlock    *types.Block
 
-	evsw *events.EventSwitch
+	evsw types.EventSwitch
 }
 
-func NewBlockchainReactor(state *sm.State, proxyAppConn proxy.AppConn, store *BlockStore, fastSync bool) *BlockchainReactor {
+func NewBlockchainReactor(state *sm.State, proxyAppConn proxy.AppConnConsensus, store *BlockStore, fastSync bool) *BlockchainReactor {
 	if state.LastBlockHeight == store.Height()-1 {
 		store.height -= 1 // XXX HACK, make this better
 	}
@@ -130,7 +129,7 @@ func (bcR *BlockchainReactor) Receive(chID byte, src *p2p.Peer, msgBytes []byte)
 		return
 	}
 
-	log.Notice("Receive", "src", src, "chID", chID, "msg", msg)
+	log.Debug("Receive", "src", src, "chID", chID, "msg", msg)
 
 	switch msg := msg.(type) {
 	case *bcBlockRequestMessage:
@@ -196,7 +195,7 @@ FOR_LOOP:
 			// ask for status updates
 			go bcR.BroadcastStatusRequest()
 		case _ = <-switchToConsensusTicker.C:
-			height, numPending := bcR.pool.GetStatus()
+			height, numPending, _ := bcR.pool.GetStatus()
 			outbound, inbound, _ := bcR.Switch.NumPeers()
 			log.Info("Consensus ticker", "numPending", numPending, "total", len(bcR.pool.requesters),
 				"outbound", outbound, "inbound", inbound)
@@ -231,19 +230,22 @@ FOR_LOOP:
 					break SYNC_LOOP
 				} else {
 					bcR.pool.PopRequest()
+					// TODO: use ApplyBlock instead of Exec/Commit/SetAppHash/Save
 					err := bcR.state.ExecBlock(bcR.evsw, bcR.proxyAppConn, first, firstPartsHeader)
 					if err != nil {
 						// TODO This is bad, are we zombie?
-						PanicQ(Fmt("Failed to process committed block: %v", err))
+						PanicQ(Fmt("Failed to process committed block (%d:%X): %v", first.Height, first.Hash(), err))
 					}
-					/*
-						err = bcR.proxyAppConn.CommitSync()
-						if err != nil {
-							// TODO Handle gracefully.
-							PanicQ(Fmt("Failed to commit block at application: %v", err))
-						}
-					*/
+					// NOTE: we could improve performance if we
+					// didn't make the app commit to disk every block
+					// ... but we would need a way to get the hash without it persisting
+					res := bcR.proxyAppConn.CommitSync()
+					if res.IsErr() {
+						// TODO Handle gracefully.
+						PanicQ(Fmt("Failed to commit block at application: %v", res))
+					}
 					bcR.store.SaveBlock(first, firstParts, second.LastCommit)
+					bcR.state.AppHash = res.Data
 					bcR.state.Save()
 				}
 			}
@@ -265,7 +267,7 @@ func (bcR *BlockchainReactor) BroadcastStatusRequest() error {
 }
 
 // implements events.Eventable
-func (bcR *BlockchainReactor) SetEventSwitch(evsw *events.EventSwitch) {
+func (bcR *BlockchainReactor) SetEventSwitch(evsw types.EventSwitch) {
 	bcR.evsw = evsw
 }
 

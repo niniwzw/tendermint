@@ -49,7 +49,7 @@ type Mempool struct {
 	config cfg.Config
 
 	proxyMtx      sync.Mutex
-	proxyAppConn  proxy.AppConn
+	proxyAppConn  proxy.AppConnMempool
 	txs           *clist.CList    // concurrent linked-list of good txs
 	counter       int64           // simple incrementing counter
 	height        int             // the last block Update()'d to
@@ -59,11 +59,13 @@ type Mempool struct {
 
 	// Keep a cache of already-seen txs.
 	// This reduces the pressure on the proxyApp.
-	cacheMap  map[string]struct{}
-	cacheList *list.List
+	cache *txCache
+
+	// A log of mempool txs
+	wal *AutoFile
 }
 
-func NewMempool(config cfg.Config, proxyAppConn proxy.AppConn) *Mempool {
+func NewMempool(config cfg.Config, proxyAppConn proxy.AppConnMempool) *Mempool {
 	mempool := &Mempool{
 		config:        config,
 		proxyAppConn:  proxyAppConn,
@@ -74,13 +76,25 @@ func NewMempool(config cfg.Config, proxyAppConn proxy.AppConn) *Mempool {
 		recheckCursor: nil,
 		recheckEnd:    nil,
 
-		cacheMap:  make(map[string]struct{}, cacheSize),
-		cacheList: list.New(),
+		cache: newTxCache(cacheSize),
 	}
+	mempool.initWAL()
 	proxyAppConn.SetResponseCallback(mempool.resCb)
 	return mempool
 }
 
+func (mem *Mempool) initWAL() {
+	walFileName := mem.config.GetString("mempool_wal")
+	if walFileName != "" {
+		af, err := OpenAutoFile(walFileName)
+		if err != nil {
+			PanicSanity(err)
+		}
+		mem.wal = af
+	}
+}
+
+// consensus must be able to hold lock to safely update
 func (mem *Mempool) Lock() {
 	mem.proxyMtx.Lock()
 }
@@ -89,8 +103,22 @@ func (mem *Mempool) Unlock() {
 	mem.proxyMtx.Unlock()
 }
 
+// Number of transactions in the mempool clist
 func (mem *Mempool) Size() int {
 	return mem.txs.Len()
+}
+
+// Remove all transactions from mempool and cache
+func (mem *Mempool) Flush() {
+	mem.proxyMtx.Lock()
+	defer mem.proxyMtx.Unlock()
+
+	mem.cache.Reset()
+
+	for e := mem.txs.Front(); e != nil; e = e.Next() {
+		mem.txs.Remove(e)
+		e.DetachPrev()
+	}
 }
 
 // Return the first element of mem.txs for peer goroutines to call .NextWait() on.
@@ -109,7 +137,7 @@ func (mem *Mempool) CheckTx(tx types.Tx, cb func(*tmsp.Response)) (err error) {
 	defer mem.proxyMtx.Unlock()
 
 	// CACHE
-	if _, exists := mem.cacheMap[string(tx)]; exists {
+	if mem.cache.Exists(tx) {
 		if cb != nil {
 			cb(&tmsp.Response{
 				Value: &tmsp.Response_CheckTx{
@@ -122,15 +150,16 @@ func (mem *Mempool) CheckTx(tx types.Tx, cb func(*tmsp.Response)) (err error) {
 		}
 		return nil
 	}
-	if mem.cacheList.Len() >= cacheSize {
-		popped := mem.cacheList.Front()
-		poppedTx := popped.Value.(types.Tx)
-		delete(mem.cacheMap, string(poppedTx))
-		mem.cacheList.Remove(popped)
-	}
-	mem.cacheMap[string(tx)] = struct{}{}
-	mem.cacheList.PushBack(tx)
+	mem.cache.Push(tx)
 	// END CACHE
+
+	// WAL
+	if mem.wal != nil {
+		// TODO: Notify administrators when WAL fails
+		mem.wal.Write([]byte(tx))
+		mem.wal.Write([]byte("\n"))
+	}
+	// END WAL
 
 	// NOTE: proxyAppConn may error if tx buffer is full
 	if err = mem.proxyAppConn.Error(); err != nil {
@@ -165,8 +194,12 @@ func (mem *Mempool) resCbNormal(req *tmsp.Request, res *tmsp.Response) {
 			}
 			mem.txs.PushBack(memTx)
 		} else {
-			log.Info("Bad Transaction", "res", r)
 			// ignore bad transaction
+			log.Info("Bad Transaction", "res", r)
+
+			// remove from cache (it might be good later)
+			mem.cache.Remove(req.GetCheckTx().Tx)
+
 			// TODO: handle other retcodes
 		}
 	default:
@@ -188,6 +221,9 @@ func (mem *Mempool) resCbRecheck(req *tmsp.Request, res *tmsp.Response) {
 			// Tx became invalidated due to newly committed block.
 			mem.txs.Remove(mem.recheckCursor)
 			mem.recheckCursor.DetachPrev()
+
+			// remove from cache (it might be good later)
+			mem.cache.Remove(req.GetCheckTx().Tx)
 		}
 		if mem.recheckCursor == mem.recheckEnd {
 			mem.recheckCursor = nil
@@ -205,7 +241,7 @@ func (mem *Mempool) resCbRecheck(req *tmsp.Request, res *tmsp.Response) {
 }
 
 // Get the valid transactions remaining
-// If maxTxs is 0, there is no cap.
+// If maxTxs is -1, there is no cap on returned transactions.
 func (mem *Mempool) Reap(maxTxs int) []types.Tx {
 	mem.proxyMtx.Lock()
 	defer mem.proxyMtx.Unlock()
@@ -270,10 +306,13 @@ func (mem *Mempool) filterTxs(blockTxsMap map[string]struct{}) []types.Tx {
 	goodTxs := make([]types.Tx, 0, mem.txs.Len())
 	for e := mem.txs.Front(); e != nil; e = e.Next() {
 		memTx := e.Value.(*mempoolTx)
+		// Remove the tx if it's alredy in a block.
 		if _, ok := blockTxsMap[string(memTx.tx)]; ok {
-			// Remove the tx since already in block.
+			// remove from clist
 			mem.txs.Remove(e)
 			e.DetachPrev()
+
+			// NOTE: we don't remove committed txs from the cache.
 			continue
 		}
 		// Good tx!
@@ -310,4 +349,63 @@ type mempoolTx struct {
 
 func (memTx *mempoolTx) Height() int {
 	return int(atomic.LoadInt64(&memTx.height))
+}
+
+//--------------------------------------------------------------------------------
+
+type txCache struct {
+	mtx  sync.Mutex
+	size int
+	map_ map[string]struct{}
+	list *list.List // to remove oldest tx when cache gets too big
+}
+
+func newTxCache(cacheSize int) *txCache {
+	return &txCache{
+		size: cacheSize,
+		map_: make(map[string]struct{}, cacheSize),
+		list: list.New(),
+	}
+}
+
+func (cache *txCache) Reset() {
+	cache.mtx.Lock()
+	cache.map_ = make(map[string]struct{}, cacheSize)
+	cache.list.Init()
+	cache.mtx.Unlock()
+}
+
+func (cache *txCache) Exists(tx types.Tx) bool {
+	cache.mtx.Lock()
+	_, exists := cache.map_[string(tx)]
+	cache.mtx.Unlock()
+	return exists
+}
+
+// Returns false if tx is in cache.
+func (cache *txCache) Push(tx types.Tx) bool {
+	cache.mtx.Lock()
+	defer cache.mtx.Unlock()
+
+	if _, exists := cache.map_[string(tx)]; exists {
+		return false
+	}
+
+	if cache.list.Len() >= cache.size {
+		popped := cache.list.Front()
+		poppedTx := popped.Value.(types.Tx)
+		// NOTE: the tx may have already been removed from the map
+		// but deleting a non-existant element is fine
+		delete(cache.map_, string(poppedTx))
+		cache.list.Remove(popped)
+	}
+	cache.map_[string(tx)] = struct{}{}
+	cache.list.PushBack(tx)
+	return true
+}
+
+func (cache *txCache) Remove(tx types.Tx) {
+	cache.mtx.Lock()
+	delete(cache.map_, string(tx))
+	cache.mtx.Unlock()
 }
