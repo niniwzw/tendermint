@@ -1,7 +1,6 @@
 #! /bin/bash
 
-tendermint node --seeds="$TMSEEDS" --moniker="$TMNAME"
-rt TMREPO=github.com/tendermint/tendermint
+export TMREPO=github.com/tendermint/tendermint
 export TMHEAD=master
 mkdir -p $GOPATH/src/$TMREPO
 cd $GOPATH/src/$TMREPO
