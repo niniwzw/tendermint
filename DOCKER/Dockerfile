@@ -4,6 +4,7 @@ FROM golang:1.6
 ENV USER tmuser
 ENV DATA_ROOT /data/tendermint
 
+
 # Set user right away for determinism
 RUN groupadd -r $USER \
   && useradd -r -s /bin/false -g $USER $USER
@@ -50,5 +51,6 @@ ENV TMROOT $DATA_ROOT
 EXPOSE 46656
 EXPOSE 46657
 
+RUN tendermint init
 # Run tendermint
 CMD ["tendermint"]
